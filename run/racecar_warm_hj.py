@@ -482,8 +482,11 @@ class OccupancyMap:
 
 def main():
 
-    # env = posggym.make('DrivingContinuous-v0', world="30x30ScatteredObstacleField", num_agents=1, n_sensors=N_SENSORS, render_mode="human")
-    env = posggym.make('DrivingContinuous-v0', world="30x30Empty", num_agents=1, n_sensors=N_SENSORS, render_mode="human")
+    # Use one of the supported worlds
+    # Check posggym documentation for available worlds: 
+    # '6x6Intersection', '7x7Blocks', '7x7CrissCross', '7x7RoundAbout', '14x14Blocks', '14x14CrissCross', '14x14RoundAbout'
+    # Add render_mode="human" if you want to see the pygame visualization
+    env = posggym.make('DrivingContinuous-v0', world="14x14Blocks", num_agents=1, n_sensors=N_SENSORS)
 
     # Comment out WarmStartSolver since we're focusing on MPPI visualization
     # solver = WarmStartSolver(
