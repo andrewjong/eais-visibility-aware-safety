@@ -503,10 +503,17 @@ def main():
         nom_controller.set_odom((vehicle_x, vehicle_y), vehicle_angle)
         action = nom_controller.get_command().cpu().numpy()
         
+        # Print the action for debugging
+        print(f"MPPI action: linear_vel={action[0]:.2f}, angular_vel={action[1]:.2f}")
+        
         # Get and visualize MPPI trajectories
         sampled_trajectories = nom_controller.get_sampled_trajectories()
         chosen_trajectory = nom_controller.get_chosen_trajectory()
         occupancy_map.visualize_mppi_trajectories(sampled_trajectories, chosen_trajectory)
+        
+        # Ensure action is properly formatted for the environment
+        # The environment expects a single value for angular velocity
+        # We're now returning [linear_vel, angular_vel]
 
         # # now compute HJ reachability
         # values = solver.solve(fail_set.T, target_time=-10.0, dt=0.1, epsilon=0.0001)

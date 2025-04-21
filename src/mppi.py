@@ -16,6 +16,9 @@ def dubins_dynamics_tensor(
     """
     current_state: shape(num_samples, dim_x)
     action: shape(num_samples, dim_u)
+    
+    action[:, 0] = linear velocity
+    action[:, 1] = angular velocity
 
     Implemented discrete time dynamics with RK-4.
 
@@ -25,9 +28,12 @@ def dubins_dynamics_tensor(
 
     def one_step_dynamics(state, action):
         """Compute the derivatives [dx/dt, dy/dt, dtheta/dt]."""
-        x_dot = 2.0 * torch.cos(state[:, 2])
-        y_dot = 2.0 * torch.sin(state[:, 2])
-        theta_dot = action[:, 0]
+        # Use the first control input as linear velocity instead of constant 2.0
+        linear_vel = action[:, 0]
+        x_dot = linear_vel * torch.cos(state[:, 2])
+        y_dot = linear_vel * torch.sin(state[:, 2])
+        # Use the second control input as angular velocity
+        theta_dot = action[:, 1]
         return torch.stack([x_dot, y_dot, theta_dot], dim=1)
 
     # k1
@@ -521,7 +527,8 @@ class Navigator:
         Get the chosen trajectory based on the current control sequence.
         
         Returns:
-            torch.Tensor: Tensor of shape (T, nx) containing the chosen trajectory
+            torch.Tensor: Tensor of shape (T+1, nx) containing the chosen trajectory
+                          (including initial state)
         """
         if self.planner_type == "mppi":
             # Start with current state
@@ -531,6 +538,14 @@ class Navigator:
             # Roll out the trajectory using the current control sequence
             for t in range(self.planner.T):
                 action = self.planner.U[t].unsqueeze(0)  # Shape: (1, nu)
+                # Make sure action has both linear and angular velocity components
+                if action.shape[1] < 2:
+                    # If for some reason action is 1D, expand it to 2D
+                    expanded_action = torch.zeros((1, 2), dtype=self.dtype, device=self.device)
+                    expanded_action[0, 0] = 1.0  # Default linear velocity
+                    expanded_action[0, 1] = action[0, 0]  # Use original action as angular velocity
+                    action = expanded_action
+                
                 state = dubins_dynamics_tensor(state, action, self.dt)
                 trajectory.append(state.squeeze(0))
                 
@@ -543,21 +558,36 @@ class Navigator:
         mppi_config["running_cost"] = self.mppi_cost_func
         mppi_config["nx"] = 3  # [x, y, theta]
         mppi_config["dt"] = self.dt
-        mppi_config["noise_sigma"] = torch.eye(2, dtype=self.dtype, device=self.device)
+        
+        # Adjust noise sigma for better control
+        # First dimension is linear velocity, second is angular velocity
+        noise_sigma = torch.zeros((2, 2), dtype=self.dtype, device=self.device)
+        noise_sigma[0, 0] = 0.5  # Linear velocity noise
+        noise_sigma[1, 1] = 0.3  # Angular velocity noise
+        mppi_config["noise_sigma"] = noise_sigma
+        
         mppi_config["num_samples"] = 200
         mppi_config["horizon"] = 20
         mppi_config["device"] = self.device
-        mppi_config["u_min"] = torch.tensor([-5, -4])
-        mppi_config["u_max"] = torch.tensor([5, 4])
-        mppi_config["lambda_"] = 1
+        
+        # Update control bounds for linear and angular velocity
+        # First dimension: linear velocity bounds
+        # Second dimension: angular velocity bounds
+        mppi_config["u_min"] = torch.tensor([0.0, -1.0], dtype=self.dtype, device=self.device)  # Min linear vel = 0 (no reverse)
+        mppi_config["u_max"] = torch.tensor([3.0, 1.0], dtype=self.dtype, device=self.device)   # Max linear vel = 3.0
+        
+        # Adjust lambda for better exploration vs exploitation balance
+        mppi_config["lambda_"] = 0.1  # Reduced from 1.0 for smoother control
         mppi_config["rollout_samples"] = 1
         mppi_config["terminal_state_cost"] = self.mppi_terminal_state_cost_funct
-        mppi_config["rollout_var_cost"] = 0.1  # Increase from 0
-        mppi_config["rollout_var_discount"] = 0.9  # Adjust from 0.95
+        mppi_config["rollout_var_cost"] = 0.05  # Reduced from 0.1
+        mppi_config["rollout_var_discount"] = 0.95  # Increased from 0.9
+        
+        # Initialize with a small forward velocity and zero angular velocity
         mppi_config["u_init"] = torch.tensor(
-            [0.0, 0.0], dtype=self.dtype, device=self.device
+            [1.0, 0.0], dtype=self.dtype, device=self.device
         )
-        mppi_config["u_per_command"] = 1
+        mppi_config["u_per_command"] = 2  # Return both linear and angular velocity commands
 
         return mppi_config
 
@@ -612,26 +642,62 @@ class Navigator:
         return collisions
 
     def mppi_cost_func(
-        self, current_state: torch.Tensor, action: torch.Tensor, t, weights=(1, 2.5)
+        self, current_state: torch.Tensor, action: torch.Tensor, t, weights=(1.0, 5.0, 0.1, 0.05)
     ) -> torch.Tensor:
         """
         current_state: shape(num_samples, dim_x)
+        action: shape(num_samples, dim_u) where dim_u=2 (linear and angular velocity)
+        t: time step
+        weights: tuple of weights for different cost components
+            weights[0]: distance to goal weight
+            weights[1]: collision cost weight
+            weights[2]: control effort weight for linear velocity
+            weights[3]: control effort weight for angular velocity
+        
         return:
-        cost: torch.tensor, shape(num_samples, 1)
+        cost: torch.tensor, shape(num_samples)
         """
+        # Distance to goal cost
         dist_goal_cost = torch.norm(current_state[:, :2] - self._goal_torch, dim=1)
+        
+        # Collision cost
         collision_cost = self._compute_collision_cost(current_state, action)
-
-        cost = weights[0] * dist_goal_cost + weights[1] * collision_cost
+        
+        # Control effort costs - penalize large control inputs
+        linear_vel_cost = torch.abs(action[:, 0])
+        angular_vel_cost = torch.square(action[:, 1])  # Square to penalize large angular velocities more
+        
+        # Heading alignment cost - encourage robot to face the goal
+        goal_direction = self._goal_torch - current_state[:, :2]
+        goal_angle = torch.atan2(goal_direction[:, 1], goal_direction[:, 0])
+        heading_diff = torch.abs(torch.remainder(goal_angle - current_state[:, 2] + np.pi, 2 * np.pi) - np.pi)
+        heading_cost = heading_diff / np.pi  # Normalize to [0, 1]
+        
+        # Combined cost
+        cost = (
+            weights[0] * dist_goal_cost + 
+            weights[1] * collision_cost + 
+            weights[2] * linear_vel_cost + 
+            weights[3] * angular_vel_cost +
+            0.2 * heading_cost  # Small weight for heading alignment
+        )
+        
         return cost
 
     def mppi_terminal_state_cost_funct(
         self, states: torch.Tensor, actions: torch.Tensor
     ) -> torch.Tensor:
         """
-        states: shape(M*K, T, dim_x)
+        states: shape(M*K, dim_x) - terminal states
+        actions: shape(M*K, dim_u) - terminal actions
+        
+        Returns:
+            torch.Tensor: Terminal cost with shape(M*K)
         """
-        return self.mppi_cost_func(states, actions, 1)
+        # Use the same cost function but with higher weight on distance to goal
+        # and lower weight on control effort for terminal states
+        terminal_weights = (2.0, 5.0, 0.05, 0.02)  # Increased goal weight, reduced control weights
+        return self.mppi_cost_func(states, actions, -1, weights=terminal_weights)
 
 
 if __name__ == "__main__":
