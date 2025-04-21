@@ -335,7 +335,7 @@ class OccupancyMap:
             
         # Create a separate figure for continuous space visualization
         if not hasattr(self, 'continuous_fig') or self.continuous_fig is None:
-            self.continuous_fig, self.continuous_ax = plt.subplots(figsize=(8, 8))
+            self.continuous_fig, self.continuous_ax = plt.subplots(figsize=(10, 10))
             plt.ion()  # Enable interactive mode
             self.continuous_ax.set_xlabel('X (world units)')
             self.continuous_ax.set_ylabel('Y (world units)')
@@ -358,6 +358,13 @@ class OccupancyMap:
             self.continuous_mppi_lines = []
             self.continuous_chosen_line = None
             self.continuous_robot_marker = None
+            self.continuous_fig.tight_layout()
+            
+            # Add text annotation for control values
+            self.control_text = self.continuous_ax.text(
+                0.02, 0.98, "", transform=self.continuous_ax.transAxes,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.7)
+            )
             
         # Clear previous trajectory lines in continuous space
         for line in self.continuous_mppi_lines:
@@ -388,12 +395,12 @@ class OccupancyMap:
                 self.continuous_orientation_arrow.remove()
                 
             if self.last_robot_angle is not None:
-                arrow_length = 1.0  # Length of the orientation arrow
+                arrow_length = 1.5  # Increased length of the orientation arrow
                 dx = arrow_length * math.cos(self.last_robot_angle)
                 dy = arrow_length * math.sin(self.last_robot_angle)
                 self.continuous_orientation_arrow = self.continuous_ax.arrow(
                     self.last_robot_pos[0], self.last_robot_pos[1], dx, dy,
-                    head_width=0.3, head_length=0.5, fc='r', ec='r'
+                    head_width=0.4, head_length=0.6, fc='r', ec='r'
                 )
             
         # Convert trajectories to numpy for plotting in continuous space
@@ -402,7 +409,7 @@ class OccupancyMap:
             num_trajectories = trajectories_np.shape[0]
             
             # Plot a subset of trajectories to avoid cluttering the plot
-            max_trajectories_to_plot = min(50, num_trajectories)
+            max_trajectories_to_plot = min(100, num_trajectories)  # Increased from 50 to 100
             step = max(1, num_trajectories // max_trajectories_to_plot)
             
             for i in range(0, num_trajectories, step):
@@ -421,9 +428,25 @@ class OccupancyMap:
             chosen_x = chosen_traj_np[:, 0]
             chosen_y = chosen_traj_np[:, 1]
             
+            # Calculate and display the heading of the first segment of the chosen trajectory
+            if len(chosen_x) > 1:
+                dx = chosen_x[1] - chosen_x[0]
+                dy = chosen_y[1] - chosen_y[0]
+                chosen_heading = math.atan2(dy, dx)
+                
+                # Update control text with trajectory information
+                if hasattr(self, 'last_action') and self.last_action is not None:
+                    control_info = f"Linear vel: {self.last_action[0]:.2f}\nAngular vel: {self.last_action[1]:.2f}\n"
+                    control_info += f"Traj heading: {chosen_heading:.2f}\nRobot heading: {self.last_robot_angle:.2f}"
+                    self.control_text.set_text(control_info)
+            
             self.continuous_chosen_line = self.continuous_ax.plot(
                 chosen_x, chosen_y, 'g-', alpha=0.8, linewidth=2, label='Chosen Trajectory'
             )[0]
+            
+            # Add markers at each point of the chosen trajectory to show time steps
+            for t in range(1, len(chosen_x), 2):  # Add markers every 2 steps
+                self.continuous_ax.plot(chosen_x[t], chosen_y[t], 'go', markersize=4, alpha=0.6)
             
             # Add goal marker
             if hasattr(self, 'goal_marker') and self.goal_marker is not None:
@@ -434,9 +457,20 @@ class OccupancyMap:
                 'g*', markersize=15, label='Goal'
             )[0]
             
+            # Draw a line from robot to first point of chosen trajectory
+            if self.last_robot_pos is not None and len(chosen_x) > 1:
+                if hasattr(self, 'robot_to_traj_line') and self.robot_to_traj_line is not None:
+                    self.robot_to_traj_line.remove()
+                
+                self.robot_to_traj_line = self.continuous_ax.plot(
+                    [self.last_robot_pos[0], chosen_x[1]], 
+                    [self.last_robot_pos[1], chosen_y[1]], 
+                    'y--', linewidth=1.5, alpha=0.7
+                )[0]
+            
         # Add legend
         if not hasattr(self, 'legend_added') or not self.legend_added:
-            self.continuous_ax.legend()
+            self.continuous_ax.legend(loc='upper right')
             self.legend_added = True
             
         self.continuous_fig.canvas.draw()
@@ -505,6 +539,11 @@ def main():
         
         # Print the action for debugging
         print(f"MPPI action: linear_vel={action[0]:.2f}, angular_vel={action[1]:.2f}")
+        
+        # Store the action in the occupancy map for visualization
+        occupancy_map.last_action = action
+        occupancy_map.last_robot_pos = (vehicle_x, vehicle_y)
+        occupancy_map.last_robot_angle = vehicle_angle
         
         # Get and visualize MPPI trajectories
         sampled_trajectories = nom_controller.get_sampled_trajectories()
